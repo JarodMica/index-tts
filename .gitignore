@@ -29,3 +29,10 @@ desktop.ini
 /checkpoints/*
 !/checkpoints/*.yaml
 /outputs/
+
+Agent_Instructions/
+DeepSpeed/
+prompts/
+*_dataset/
+
+*.whl
