@@ -35,7 +35,7 @@ dependencies = [
     "gradio>=5.44.1",
     "jieba==0.42.1",
     "json5==0.10.0",
-    "keras==2.9.0",
+    "keras==2.13.1rc0",
     "librosa==0.10.2.post1",
     "matplotlib==3.8.2",
     "modelscope==1.27.0",
@@ -55,15 +55,14 @@ dependencies = [
     # Use "wetext" on Windows/Mac, otherwise "WeTextProcessing" on Linux."
     "wetext>=0.0.9; sys_platform != 'linux'",
     "WeTextProcessing; sys_platform == 'linux'",
-    "deepspeed",
+    "einops>=0.8.1",
 ]
 
 [project.optional-dependencies]
 cu128 = [
   "torch>=2.7.1",
   "torchvision>=0.22.1",
-  "torchaudio>=2.7.1",
-  "deepspeed==0.17.1",
+  "torchaudio>=2.7.1"
 ]
 
 # To install the WebUI support, use `uv sync --extra webui` (or `--all-extras`).
@@ -71,9 +70,7 @@ webui = [
   "gradio==5.45.0",
 ]
 # To install the DeepSpeed support, use `uv sync --extra deepspeed` (or `--all-extras`).
-deepspeed = [
-  "deepspeed==0.17.1",
-]
+deepspeed = []
 
 [project.urls]
 Homepage = "https://github.com/index-tts/index-tts"
@@ -112,7 +109,6 @@ torchvision = [
 torchaudio = [
   { index = "pytorch-cu128", extra = "cu128" },
 ]
-deepspeed = { path = "deepspeed-0.17.1+2ce55057-cp310-cp310-win_amd64.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

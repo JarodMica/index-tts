@@ -12,8 +12,12 @@
 ## YouTube Installation Instructions
 
 ```
-
-
+git clone https://github.com/JarodMica/index-tts.git
+cd index-tts
+git switch youtube
+uv sync
+uv run huggingface-cli download IndexTeam/IndexTTS-2 --local-dir checkpoints
+uv run .\webui_parallel.py
 ```
 
 ## 👉🏻 IndexTTS2 👈🏻
