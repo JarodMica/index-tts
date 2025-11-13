@@ -380,6 +380,20 @@ class IndexTTS2:
         code_lens = torch.tensor(code_lens, dtype=torch.long, device=device)
         return codes, code_lens
 
+    def interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
+        """
+        Silences to be insert between generated segments.
+        """
+
+        if not wavs or interval_silence <= 0:
+            return wavs
+
+        # get channel_size
+        channel_size = wavs[0].size(0)
+        # get silence tensor
+        sil_dur = int(sampling_rate * interval_silence / 1000.0)
+        return torch.zeros(channel_size, sil_dur)
+
     def insert_interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
         """
         Insert silences between sentences.
@@ -413,7 +427,35 @@ class IndexTTS2:
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
               duration_seconds=None,
-              verbose=False, max_text_tokens_per_sentence=120, **generation_kwargs):
+              verbose=False, max_text_tokens_per_sentence=120, stream_return=False, more_segment_before=0, **generation_kwargs):
+        if stream_return:
+            return self.infer_generator(
+                spk_audio_prompt, text, output_path,
+                emo_audio_prompt, emo_alpha,
+                emo_vector,
+                use_emo_text, emo_text, use_random, interval_silence,
+                duration_seconds,
+                verbose, max_text_tokens_per_sentence, stream_return, more_segment_before, **generation_kwargs
+            )
+        else:
+            try:
+                return list(self.infer_generator(
+                    spk_audio_prompt, text, output_path,
+                    emo_audio_prompt, emo_alpha,
+                    emo_vector,
+                    use_emo_text, emo_text, use_random, interval_silence,
+                    duration_seconds,
+                    verbose, max_text_tokens_per_sentence, stream_return, more_segment_before, **generation_kwargs
+                ))[0]
+            except IndexError:
+                return None
+
+    def infer_generator(self, spk_audio_prompt, text, output_path,
+              emo_audio_prompt=None, emo_alpha=1.0,
+              emo_vector=None,
+              use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
+              duration_seconds=None,
+              verbose=False, max_text_tokens_per_sentence=120, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
         print(">> start inference...")
         self._set_gr_progress(0, "start inference...")
         if verbose:
@@ -515,7 +557,7 @@ class IndexTTS2:
 
         self._set_gr_progress(0.1, "text processing...")
         text_tokens_list = self.tokenizer.tokenize(text)
-        sentences = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=max_text_tokens_per_sentence)
+        sentences = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=max_text_tokens_per_sentence, quick_streaming_tokens = quick_streaming_tokens)
         if verbose:
             print("text_tokens_list:", text_tokens_list)
             print("sentences count:", len(sentences))
@@ -539,6 +581,7 @@ class IndexTTS2:
         bigvgan_time = 0
         progress = 0
         has_warned = False
+        silence = None # for stream_return
         duration_plan = None
         target_duration_tokens = None
         if duration_seconds is not None:
@@ -746,6 +789,11 @@ class IndexTTS2:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
                 # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
+                if stream_return:
+                    yield wav.cpu()
+                    if silence == None:
+                        silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                    yield silence
         end_time = time.perf_counter()
         self._set_gr_progress(0.9, "save audio...")
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
@@ -770,12 +818,16 @@ class IndexTTS2:
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
             print(">> wav file saved to:", output_path)
-            return output_path
+            if stream_return:
+                return None
+            yield output_path
         else:
+            if stream_return:
+                return None
             # 返回以符合Gradio的格式要求
             wav_data = wav.type(torch.int16)
             wav_data = wav_data.numpy().T
-            return (sampling_rate, wav_data)
+            yield (sampling_rate, wav_data)
 
 
 def find_most_similar_cosine(query_vector, matrix):
