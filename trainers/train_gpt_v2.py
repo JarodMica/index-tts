@@ -32,6 +32,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+try:
+    from bitsandbytes.optim import AdamW8bit
+except ImportError:
+    AdamW8bit = None
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
@@ -79,6 +83,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--text-loss-weight", type=float, default=0.2, help="Weight for text CE loss.")
     parser.add_argument("--mel-loss-weight", type=float, default=0.8, help="Weight for semantic CE loss.")
     parser.add_argument("--amp", action="store_true", help="Enable CUDA AMP.")
+    parser.add_argument("--gradient-checkpointing", action="store_true", help="Enable gradient checkpointing to reduce VRAM usage.")
+    parser.add_argument("--optim-8bit", action="store_true", help="Use bitsandbytes AdamW8bit optimizer to reduce memory.")
     parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume from, or 'auto'.")
     parser.add_argument(
         "--use-duration-control",
@@ -464,6 +470,15 @@ def build_model(cfg_path: Path, tokenizer: TextTokenizer, base_checkpoint: Path,
     return model.to(device)
 
 
+def enable_gradient_checkpointing(model: UnifiedVoice):
+    """Enable gradient checkpointing on the GPT backbone to save VRAM."""
+    if hasattr(model, "gpt") and hasattr(model.gpt, "gradient_checkpointing_enable"):
+        model.gpt.gradient_checkpointing_enable()
+        print("[Info] Gradient checkpointing enabled on GPT backbone.")
+    else:
+        print("[Warn] GPT backbone does not support gradient_checkpointing_enable().")
+
+
 def compute_losses(
     model: UnifiedVoice,
     batch: Dict[str, torch.Tensor],
@@ -668,7 +683,18 @@ def main() -> None:
         pin_memory=use_cuda,
     )
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    # --- Gradient checkpointing ---
+    if args.gradient_checkpointing:
+        enable_gradient_checkpointing(model)
+
+    # --- Optimizer ---
+    if args.optim_8bit:
+        if AdamW8bit is None:
+            raise ImportError("bitsandbytes is required for --optim-8bit. Install with: pip install bitsandbytes")
+        optimizer = AdamW8bit(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+        print("[Info] Using AdamW8bit optimizer.")
+    else:
+        optimizer = AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     total_steps = args.max_steps if args.max_steps > 0 else args.epochs * max(1, len(train_loader)) // max(1, args.grad_accumulation)
     total_steps = max(total_steps, 1)
     scheduler = get_cosine_schedule_with_warmup(
@@ -677,7 +703,7 @@ def main() -> None:
         num_training_steps=total_steps,
     )
     use_amp = args.amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     global_step = 0
     start_epoch = 0
@@ -695,9 +721,35 @@ def main() -> None:
     if resume_path:
         checkpoint = torch.load(resume_path, map_location=device)
         model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+
+        # Detect optimizer type mismatch before loading state
+        saved_opt_state = checkpoint.get("optimizer", {})
+        skip_optim = False
+        if args.optim_8bit and saved_opt_state.get("state"):
+            first_state = next(iter(saved_opt_state["state"].values()), {})
+            if "state1" not in first_state:
+                print("[Warn] Checkpoint was saved with standard AdamW but --optim-8bit is active.")
+                print("[Warn] Skipping optimizer state restore (incompatible formats).")
+                skip_optim = True
+        elif not args.optim_8bit and saved_opt_state.get("state"):
+            first_state = next(iter(saved_opt_state["state"].values()), {})
+            if "state1" in first_state:
+                print("[Warn] Checkpoint was saved with AdamW8bit but standard AdamW is active.")
+                print("[Warn] Skipping optimizer state restore (incompatible formats).")
+                skip_optim = True
+
+        if not skip_optim:
+            try:
+                optimizer.load_state_dict(saved_opt_state)
+            except Exception as exc:
+                print(f"[Warn] Could not restore optimizer state: {exc}")
+                print("[Warn] Continuing with fresh optimizer state.")
+
         if checkpoint.get("scheduler"):
-            scheduler.load_state_dict(checkpoint["scheduler"])
+            try:
+                scheduler.load_state_dict(checkpoint["scheduler"])
+            except Exception:
+                print("[Warn] Could not restore scheduler state; starting fresh.")
         if scaler and checkpoint.get("scaler"):
             scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = checkpoint.get("epoch", 0)
@@ -709,7 +761,7 @@ def main() -> None:
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
-    save_every = 1000
+    save_every = 100
     best_val = math.inf
 
     if args.val_interval > 0 and global_step > 0:
@@ -719,7 +771,7 @@ def main() -> None:
 
     for epoch in range(start_epoch, args.epochs):
         for batch_idx, batch in enumerate(train_loader):
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 text_loss, mel_loss, metrics = compute_losses(
                     model,
                     batch,
